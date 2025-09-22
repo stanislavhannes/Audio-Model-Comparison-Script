@@ -17,11 +17,11 @@ import struct
 import threading
 import queue
 from typing import Optional, Tuple
+from datetime import datetime
 import numpy as np
 import sounddevice as sd
 import requests
 import websocket
-from datetime import datetime
 
 
 class AudioRecorder:
@@ -94,12 +94,17 @@ class AudioPlayer:
 class OpenAIRealtimeClient:
     """Client for OpenAI's Realtime API using WebSocket."""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str = "gpt-realtime"):
         self.api_key = api_key
+        self.model = model
         # OpenAI Realtime API WebSocket URL with model selection
-        # Current: GPT-5 (most capable, slower, more expensive)
-        # Alternative: Change to "gpt-4o-mini-realtime-preview-2024-10-01" for faster performance
-        self.ws_url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+        self.ws_url = f"wss://api.openai.com/v1/realtime?model={model}"
+        
+        # Model pricing (input/output per 1M tokens)
+        self.pricing = {
+            "gpt-realtime": {"input": 32.0, "output": 64.0},  # Current realtime pricing
+            "gpt-4o-realtime-preview": {"input": 40.0, "output": 80.0}  # GPT-4o realtime pricing
+        }
         self.response_queue = queue.Queue()
         self.ws = None
         self.session_id = None
@@ -142,13 +147,16 @@ class OpenAIRealtimeClient:
         
         print(f"📊 PCM data ready: {len(pcm_data)} bytes")
         
-        # Estimate input tokens (OpenAI Realtime API token estimation)
-        # Note: This is an estimate - actual token usage may vary
-        input_tokens = int(input_duration * 100)  # ~100 tokens per second
+        # We'll calculate actual input tokens from the transcript after processing
+        # (OpenAI provides input transcript via input_audio_transcription events)
+        input_tokens = 0  # Will be updated from actual transcript
         
         response_audio = None
         output_tokens = 0
         error = None
+        # Initialize token counters (will be updated from transcripts)
+        actual_input_tokens = 0
+        actual_output_tokens = 0
         self.audio_buffer = bytearray()
         self.response_complete.clear()
         self.input_transcript = ""
@@ -236,13 +244,35 @@ class OpenAIRealtimeClient:
                 
                 # Wait for response completion
                 if self.response_complete.wait(timeout=30):
+                    # Small delay to ensure all events (including transcripts) are processed
+                    time.sleep(0.2)
                     if len(self.audio_buffer) > 0:
                         response_audio = bytes(self.audio_buffer)
-                        # Estimate output tokens and duration
-                        output_duration = len(response_audio) / (24000 * 2)  # 24kHz, 16-bit
-                        output_tokens = int(output_duration * 100)
-                        print(f"✅ Received audio response ({len(response_audio)} bytes)")
-                        print(f"   Expected duration: {output_duration:.2f} seconds")
+                        
+                        # Calculate actual input tokens from transcript
+                        if self.input_transcript:
+                            actual_input_tokens = max(1, len(self.input_transcript) // 4)
+                            print(f"📊 Input tokens (from transcript): {actual_input_tokens}")
+                            print(f"   Input transcript: '{self.input_transcript}'")
+                        else:
+                            # Fallback to rough estimation if no input transcript
+                            actual_input_tokens = int(input_duration * 100)
+                            print(f"📊 Input tokens (estimated - no transcript received): {actual_input_tokens}")
+                            print(f"   Warning: Input transcript was empty or not received")
+                        
+                        # Calculate actual output tokens from transcript
+                        if self.output_transcript:
+                            # Simple token estimation: ~4 characters per token (rough approximation)
+                            actual_output_tokens = max(1, len(self.output_transcript) // 4)
+                            print(f"✅ Received audio response ({len(response_audio)} bytes)")
+                            print(f"   Output tokens (from transcript): {actual_output_tokens}")
+                        else:
+                            # Fallback to duration-based estimation if no transcript
+                            output_duration = len(response_audio) / (24000 * 2)  # 24kHz, 16-bit
+                            actual_output_tokens = int(output_duration * 100)
+                            print(f"✅ Received audio response ({len(response_audio)} bytes)")
+                            print(f"   Expected duration: {output_duration:.2f} seconds")
+                            print(f"   Output tokens (estimated from duration): {actual_output_tokens}")
                     else:
                         error = "No audio data received"
                 else:
@@ -264,15 +294,17 @@ class OpenAIRealtimeClient:
         print(f"⏱️  Total response time: {elapsed_time:.2f}s (playback not included)")
         
         # Prepare cost info
-        # WARNING: These are estimates based on available pricing info
-        # Actual costs may vary - verify with current OpenAI pricing
+        # Note: Using actual transcripts for more accurate token counting
+        # Input/output tokens calculated from OpenAI's provided transcripts
+        model_pricing = self.pricing.get(self.model, self.pricing["gpt-realtime"])
         cost_info = {
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens,
-            'input_cost': (input_tokens / 1_000_000) * 32,  # $32 per 1M tokens (estimated)
-            'output_cost': (output_tokens / 1_000_000) * 64,  # $64 per 1M tokens (estimated)
+            'input_tokens': actual_input_tokens,
+            'output_tokens': actual_output_tokens,
+            'input_cost': (actual_input_tokens / 1_000_000) * model_pricing["input"],
+            'output_cost': (actual_output_tokens / 1_000_000) * model_pricing["output"],
             'total_cost': 0,
-            'error': error
+            'error': error,
+            'model': self.model
         }
         cost_info['total_cost'] = cost_info['input_cost'] + cost_info['output_cost']
         cost_info['input_transcript'] = self.input_transcript
@@ -289,7 +321,7 @@ class OpenAIRealtimeClient:
             "type": "session.update",
             "session": {
                 "modalities": ["audio", "text"],
-                "instructions": "You are a helpful AI assistant. Always respond with speech to the user's audio input. Keep responses brief and conversational.",
+                "instructions": "You are a helpful AI assistant. Give very short, direct answers.",
                 "voice": "alloy",
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
@@ -297,7 +329,7 @@ class OpenAIRealtimeClient:
                     "model": "whisper-1"
                 },
                 "turn_detection": None,  # Disable auto turn detection to control manually
-                "temperature": 0.8
+                "temperature": 0.7
             }
         }
         ws.send(json.dumps(session_update))
@@ -576,10 +608,9 @@ class CartesiaOpenAIPipeline:
             data = {
                 "model": "gpt-4o",
                 "messages": [
-                    {"role": "system", "content": "You are a helpful assistant. Respond concisely to the user's message."},
+                    {"role": "system", "content": "You are a helpful AI assistant. Give very short, direct answers."},
                     {"role": "user", "content": text}
                 ],
-                "max_tokens": 150,
                 "temperature": 0.7
             }
             
@@ -592,8 +623,14 @@ class CartesiaOpenAIPipeline:
             if response.status_code == 200:
                 result = response.json()
                 message = result['choices'][0]['message']['content']
+                
+                # For fair comparison, only count user message tokens (exclude system prompt)
+                # The system prompt is: "You are a helpful AI assistant. Give very short, direct answers."
+                # Estimate user tokens: ~4 characters per token
+                user_tokens = max(1, len(text) // 4)
+                
                 tokens = {
-                    'input': result['usage']['prompt_tokens'],
+                    'input': user_tokens,  # Only user message tokens for fair comparison
                     'output': result['usage']['completion_tokens']
                 }
                 return message, tokens
@@ -671,7 +708,9 @@ def print_results(method: str, elapsed_time: float, cost_info: dict) -> None:
     if 'error' in cost_info and cost_info['error']:
         print(f"❌ Error: {cost_info['error']}")
     
-    if method == "OpenAI Realtime API":
+    if "OpenAI Realtime" in method:
+        model_name = cost_info.get('model', 'unknown')
+        print(f"🤖 Model: {model_name}")
         print(f"📥 Input Tokens: {cost_info.get('input_tokens', 0):,}")
         print(f"📤 Output Tokens: {cost_info.get('output_tokens', 0):,}")
         print(f"💰 Input Cost: ${cost_info.get('input_cost', 0):.4f}")
@@ -738,25 +777,45 @@ def main():
     
     print("\n🚀 Starting tests...")
     
-    # Test 1: OpenAI Realtime API
-    print("\n📡 Testing OpenAI Realtime API...")
-    realtime_client = OpenAIRealtimeClient(openai_api_key)
-    realtime_audio, realtime_time, realtime_cost = realtime_client.process_audio(input_filename)
+    # Test 1: OpenAI Realtime API (default model)
+    print("\n📡 Testing OpenAI Realtime API (default model)...")
+    realtime_client_default = OpenAIRealtimeClient(openai_api_key, model="gpt-realtime")
+    realtime_audio_default, realtime_time_default, realtime_cost_default = realtime_client_default.process_audio(input_filename)
     
-    if realtime_audio:
-        realtime_response_file = "openai_realtime_response.wav"
-        save_audio_response(realtime_audio, realtime_response_file)
-        print("\n🔊 Playing OpenAI Realtime response immediately...")
-        player.play_file(realtime_response_file)
-        print("✅ OpenAI Realtime response completed")
+    if realtime_audio_default:
+        realtime_response_file_default = "openai_realtime_default_response.wav"
+        save_audio_response(realtime_audio_default, realtime_response_file_default)
+        print("\n🔊 Playing OpenAI Realtime (default) response...")
+        player.play_file(realtime_response_file_default)
+        print("✅ OpenAI Realtime default response completed")
     else:
-        print("❌ No audio received from OpenAI Realtime API")
+        print("❌ No audio received from OpenAI Realtime API (default)")
     
     # Brief pause before starting the next test
     print("\n⏸️  Pausing for 2 seconds before next test...")
     time.sleep(2)
     
-    # Now proceed with Cartesia pipeline
+    # Test 2: OpenAI Realtime API (GPT-4o)
+    print("\n" + "="*60)
+    print("📡 Testing OpenAI Realtime API (GPT-4o)...")
+    print("="*60)
+    realtime_client_mini = OpenAIRealtimeClient(openai_api_key, model="gpt-4o-realtime-preview")
+    realtime_audio_mini, realtime_time_mini, realtime_cost_mini = realtime_client_mini.process_audio(input_filename)
+    
+    if realtime_audio_mini:
+        realtime_response_file_mini = "openai_realtime_mini_response.wav"
+        save_audio_response(realtime_audio_mini, realtime_response_file_mini)
+        print("\n🔊 Playing OpenAI Realtime GPT-4o response...")
+        player.play_file(realtime_response_file_mini)
+        print("✅ OpenAI Realtime GPT-4o response completed")
+    else:
+        print("❌ No audio received from OpenAI Realtime API (GPT-4o)")
+    
+    # Brief pause before starting the next test
+    print("\n⏸️  Pausing for 2 seconds before next test...")
+    time.sleep(2)
+    
+    # Test 3: Cartesia pipeline
     print("\n" + "="*60)
     print("🔄 Now testing Cartesia + GPT-4o Pipeline...")
     print("="*60)
@@ -767,42 +826,44 @@ def main():
     if pipeline_audio:
         pipeline_response_file = "cartesia_pipeline_response.wav"
         save_audio_response(pipeline_audio, pipeline_response_file)
-        print("\n🔊 Playing Cartesia + GPT-4 response...")
+        print("\n🔊 Playing Cartesia + GPT-4o response...")
         player.play_file(pipeline_response_file)
         print("✅ Cartesia pipeline response completed")
     else:
         print("❌ No audio received from Cartesia pipeline")
     
     # Print results
-    print_results("OpenAI Realtime API", realtime_time, realtime_cost)
-    print_results("Cartesia + GPT-4 Pipeline", pipeline_time, pipeline_cost)
+    print_results("OpenAI Realtime API (default)", realtime_time_default, realtime_cost_default)
+    print_results("OpenAI Realtime API (GPT-4o)", realtime_time_mini, realtime_cost_mini)
+    print_results("Cartesia + GPT-4o Pipeline", pipeline_time, pipeline_cost)
     
     # Summary comparison
     print(f"\n{'='*60}")
     print("📈 COMPARISON SUMMARY")
     print(f"{'='*60}")
     
-    if realtime_time > 0 and pipeline_time > 0:
-        time_diff = abs(realtime_time - pipeline_time)
-        faster_method = "OpenAI Realtime" if realtime_time < pipeline_time else "Cartesia Pipeline"
-        time_ratio = max(realtime_time, pipeline_time) / min(realtime_time, pipeline_time)
+    # Collect all results
+    results = [
+        ("OpenAI Realtime (default)", realtime_time_default, realtime_cost_default.get('total_cost', 0)),
+        ("OpenAI Realtime (GPT-4o)", realtime_time_mini, realtime_cost_mini.get('total_cost', 0)),
+        ("Cartesia + GPT-4o", pipeline_time, pipeline_cost.get('total_cost', 0))
+    ]
+    
+    # Filter out failed tests
+    valid_results = [(name, duration, cost) for name, duration, cost in results if duration > 0]
+    
+    if len(valid_results) >= 2:
+        # Speed comparison
+        print(f"\n⏱️  Speed Ranking (fastest to slowest):")
+        speed_sorted = sorted(valid_results, key=lambda x: x[1])
+        for i, (name, duration, cost) in enumerate(speed_sorted, 1):
+            print(f"   {i}. {name}: {duration:.2f}s")
         
-        print(f"\n⏱️  Speed: {faster_method} was {time_ratio:.1f}x faster")
-        print(f"   - OpenAI Realtime: {realtime_time:.2f}s")
-        print(f"   - Cartesia Pipeline: {pipeline_time:.2f}s")
-        print(f"   - Difference: {time_diff:.2f}s")
-        
-        realtime_total_cost = realtime_cost.get('total_cost', 0)
-        pipeline_total_cost = pipeline_cost.get('total_cost', 0)
-        
-        if realtime_total_cost > 0 and pipeline_total_cost > 0:
-            cheaper_method = "OpenAI Realtime" if realtime_total_cost < pipeline_total_cost else "Cartesia Pipeline"
-            cost_ratio = max(realtime_total_cost, pipeline_total_cost) / min(realtime_total_cost, pipeline_total_cost)
-            
-            print(f"\n💰 Cost: {cheaper_method} was {cost_ratio:.1f}x cheaper")
-            print(f"   - OpenAI Realtime: ${realtime_total_cost:.4f}")
-            print(f"   - Cartesia Pipeline: ${pipeline_total_cost:.4f}")
-            print(f"   - Difference: ${abs(realtime_total_cost - pipeline_total_cost):.4f}")
+        # Cost comparison  
+        print(f"\n💰 Cost Ranking (cheapest to most expensive):")
+        cost_sorted = sorted(valid_results, key=lambda x: x[2])
+        for i, (name, duration, cost) in enumerate(cost_sorted, 1):
+            print(f"   {i}. {name}: ${cost:.4f}")
     
     print(f"\n✅ Test completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")

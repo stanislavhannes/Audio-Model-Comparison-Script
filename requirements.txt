@@ -1,0 +1,16 @@
+# Audio Model Comparison Dependencies
+
+# Core dependencies
+numpy>=1.24.0
+requests>=2.31.0
+websocket-client>=1.6.0
+
+# Audio processing
+sounddevice>=0.4.6
+scipy>=1.10.0  # Required by sounddevice
+
+# Optional but recommended
+python-dotenv>=1.0.0  # For loading environment variables from .env file
+
+# Note: You may need to install PortAudio separately on macOS:
+# brew install portaudio

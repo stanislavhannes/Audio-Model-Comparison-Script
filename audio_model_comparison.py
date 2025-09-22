@@ -96,6 +96,9 @@ class OpenAIRealtimeClient:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
+        # OpenAI Realtime API WebSocket URL with model selection
+        # Current: GPT-5 (most capable, slower, more expensive)
+        # Alternative: Change to "gpt-4o-mini-realtime-preview-2024-10-01" for faster performance
         self.ws_url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
         self.response_queue = queue.Queue()
         self.ws = None

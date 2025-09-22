@@ -260,9 +260,13 @@ Please speak your message now...
 
 ## Summary
 
-Based on testing, the **Cartesia pipeline is only slightly slower but significantly cheaper** than OpenAI's Realtime API:
+Based on testing, the **Cartesia pipeline shows interesting speed patterns and is significantly cheaper** than OpenAI's Realtime API:
 
-- **Speed**: Very competitive - differences typically under 2 seconds
+- **Speed**: Performance depends on the underlying LLM model
+  - **Cartesia + GPT-4o**: Often faster due to lighter GPT-4o model
+  - **OpenAI Realtime (GPT-5)**: Slower due to more powerful but heavier model
+  - **OpenAI Realtime (GPT-4o-mini)**: Consistently faster than Cartesia pipeline
+  - Overall differences typically under 3 seconds
 - **Cost**: Cartesia pipeline is **12-36x cheaper** than OpenAI Realtime
 - **Model difference**: OpenAI Realtime likely uses GPT-5 (as of Sept 2025), while the pipeline uses GPT-4o
 
